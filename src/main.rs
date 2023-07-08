@@ -41,7 +41,5 @@ async fn main() {
         },
     };
 
-    log::info!("{:?}, {:?}, {:?}, {:?}", host, args.port, args.root, args.no_watch);
-
-    listen(&host, args.port, args.root, args.no_watch).await.unwrap();
+    listen(&host, args.port, args.root, !args.no_watch).await.unwrap();
 }
