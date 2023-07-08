@@ -27,12 +27,17 @@ pub async fn listen<R: Into<PathBuf>>(
     host: &str,
     port: u16,
     root: R,
+    dont_watch: bool,
 ) -> Result<(), std::io::Error> {
-    let connections1 = Arc::new(Mutex::new(HashMap::new()));
-    let connections2 = Arc::clone(&connections1);
-    let root1: PathBuf = root.into();
-    let root2: PathBuf = root1.clone();
+    let connections = Arc::new(Mutex::new(HashMap::new()));
+    let root: PathBuf = root.into();
 
-    task::spawn(async move { watcher::watch(root1, &connections1).await });
-    server::serve(host, port, root2, connections2).await
+    if !dont_watch {
+        let connections = Arc::clone(&connections);
+        let root = root.clone();
+
+        task::spawn(async move { watcher::watch(root, &connections).await });
+    }
+
+    server::serve(host, port, root, connections).await
 }

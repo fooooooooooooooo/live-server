@@ -16,6 +16,9 @@ struct Args {
     /// Set the root path of the static assets
     #[clap(default_value = ".")]
     root: String,
+    /// Disable live reload
+    #[clap(short, long)]
+    no_watch: bool,
 }
 
 #[async_std::main]
@@ -38,5 +41,7 @@ async fn main() {
         },
     };
 
-    listen(&host, args.port, args.root).await.unwrap();
+    log::info!("{:?}, {:?}, {:?}, {:?}", host, args.port, args.root, args.no_watch);
+
+    listen(&host, args.port, args.root, args.no_watch).await.unwrap();
 }
