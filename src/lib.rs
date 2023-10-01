@@ -11,7 +11,9 @@
 //! env_logger::init();
 //! ```
 
+mod listing;
 mod server;
+mod static_files;
 mod watcher;
 
 use std::{collections::HashMap, sync::Arc};
@@ -23,12 +25,7 @@ use async_std::{path::PathBuf, sync::Mutex, task};
 /// use live_server::listen;
 /// listen("127.0.0.1", 8080, "./").await.unwrap();
 /// ```
-pub async fn listen<R: Into<PathBuf>>(
-    host: &str,
-    port: u16,
-    root: R,
-    watch: bool,
-) -> Result<(), std::io::Error> {
+pub async fn listen<R: Into<PathBuf>>(host: &str, port: u16, root: R, watch: bool) -> Result<(), std::io::Error> {
     let connections = Arc::new(Mutex::new(HashMap::new()));
     let root: PathBuf = root.into();
 

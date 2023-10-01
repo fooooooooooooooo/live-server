@@ -74,9 +74,5 @@ pub async fn watch(root: PathBuf, connections: &Arc<Mutex<HashMap<Uuid, WebSocke
 }
 
 fn strip_prefix(path: std::path::PathBuf, prefix: &PathBuf) -> String {
-    path.strip_prefix(prefix)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string()
+    path.strip_prefix(prefix).unwrap().to_str().unwrap().to_string()
 }

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <link rel="stylesheet" href="/_live-server/index.css" />
+        <title>{{ directory }}</title>
+    </head>
+    <body>
+        <div>
+            <h2>{{ directory }}</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>
+                            <a href="../" id="parent">
+                                <svg>
+                                    <path d="m18 15-6-6-6 6" />
+                                </svg>
+                            </a>
+                        </th>
+                        <th>Name</th>
+                        <th>Size</th>
+                        <th>Modified</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ entries }}
+                </tbody>
+            </table>
+        </div>
+        <script>
+            document.getElementById("parent").addEventListener("click", (e) => {
+                e.preventDefault();
+                window.location.pathname = ((p) => {
+                    let i = p.lastIndexOf("/");
+                    return -1 === i ? p : 0 === i ? "/" : p.substring(0, i);
+                })(window.location.pathname);
+            });
+        </script>
+    </body>
+</html>

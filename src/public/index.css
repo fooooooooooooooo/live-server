@@ -1,0 +1,78 @@
+html {
+    background-color: #1f2430;
+    font-family: sans-serif, system-ui, -apple-system;
+    color: white;
+}
+
+body {
+    display: flex;
+    flex-flow: column nowrap;
+    align-items: center;
+    margin: 2rem;
+}
+
+a {
+    color: #0a84ff;
+    text-decoration: none;
+}
+
+a:hover {
+    color: #0765c4;
+}
+
+table {
+    min-width: calc(min(100vw - 4rem, 48rem));
+    border-collapse: collapse;
+    border-spacing: 0;
+    border: 1px solid #171b24;
+}
+
+table thead {
+    height: 2.5rem;
+}
+
+table tbody tr {
+    height: 42px;
+}
+
+table th,
+table td {
+    padding: 6px 12px;
+    text-align: left;
+    border-bottom: 1px solid #171b24;
+}
+
+table th {
+    background-color: #272d3b;
+    color: #cccac2;
+
+    font-size: 0.8rem;
+    font-weight: bold;
+}
+
+table th a {
+    color: currentColor;
+}
+
+table tr {
+    background-color: #242936;
+}
+
+table tr:nth-child(even) {
+    background-color: #272d3b;
+}
+
+table th:nth-child(1),
+table td:nth-child(1) {
+    width: 24px;
+}
+
+svg {
+    width: 24px;
+    height: 24px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
