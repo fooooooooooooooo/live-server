@@ -1,164 +1,210 @@
-use async_std::{
-    fs,
-    path::{Path, PathBuf},
-    prelude::*,
-    sync::Mutex,
+use std::error::Error;
+use std::io::ErrorKind;
+use std::path::Path;
+use std::{fs, net::IpAddr};
+
+use axum::{
+    body::Body,
+    extract::{ws::Message, Request, WebSocketUpgrade},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    routing::get,
+    Router,
 };
-use std::sync::Arc;
-use std::{collections::HashMap, error::Error};
-use tide::{listener::Listener, Body, Request, Response, StatusCode};
-use tide_websockets::{WebSocket, WebSocketConnection};
-use uuid::Uuid;
+use futures::{sink::SinkExt, stream::StreamExt};
+use local_ip_address::local_ip;
+use std::future::Future;
+use tokio::net::TcpListener;
 
-use crate::{listing::serve_directory_listing, static_files::get_static_file};
+use crate::listing::serve_directory_listing;
+use crate::static_files::{
+    get_dir_link_svg, get_dir_svg, get_entry_html, get_file_link_svg, get_file_svg, get_index_css,
+    get_listing_html, get_unknown_svg,
+};
+use crate::{ADDR, ROOT, TX, WATCH};
 
-macro_rules! static_assets_service {
-    ($app: expr, $route: expr, $host: ident, $port: ident, $root: ident, $watch: ident) => {
-        let host_clone = $host.to_string();
-        let port_clone = $port;
-        let root_clone = $root.clone();
-        let watch_clone = $watch;
-        $app.at($route).get(move |req: Request<()>| {
-            let host = host_clone.clone();
-            let port = port_clone.clone();
-            let root = root_clone.clone();
-            let watch = watch_clone.clone();
-            static_assets(req, host, port, root, watch)
-        });
-    };
+pub(crate) async fn serve(tcp_listener: TcpListener, router: Router) {
+    axum::serve(tcp_listener, router).await.unwrap();
 }
 
-pub async fn serve(
-    host: &str,
-    port: u16,
-    root: PathBuf,
-    connections: Arc<Mutex<HashMap<Uuid, WebSocketConnection>>>,
-    watch: bool,
-) -> Result<(), std::io::Error> {
-    let mut listener = create_listener(host, port, &root, connections, watch).await;
-    listener.accept().await
-}
+pub(crate) async fn create_listener(addr: String) -> Result<TcpListener, String> {
+    match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => {
+            let port = listener.local_addr().unwrap().port();
+            let host = listener.local_addr().unwrap().ip();
+            let host = match host.is_unspecified() {
+                true => match local_ip() {
+                    Ok(addr) => addr,
+                    Err(err) => {
+                        log::warn!("Failed to get local IP address: {}", err);
+                        host
+                    }
+                },
+                false => host,
+            };
 
-async fn create_listener(
-    host: &str,
-    port: u16,
-    root: &PathBuf,
-    connections: Arc<Mutex<HashMap<Uuid, WebSocketConnection>>>,
-    watch: bool,
-) -> impl Listener<()> {
-    let mut port = port;
-    // Loop until the port is available
-    loop {
-        let app = create_server(host, port, root, Arc::clone(&connections), watch);
-        match app.bind(format!("{host}:{port}")).await {
-            Ok(listener) => {
-                log::info!("Listening on http://{}:{}/", host, port);
-                break listener;
-            }
-            Err(err) => {
-                if let std::io::ErrorKind::AddrInUse = err.kind() {
-                    log::warn!("Port {} is already in use", port);
-                    port += 1;
-                } else {
-                    log::error!("Failed to listen on {}:{}: {}", host, port, err);
-                }
-            }
+            let addr = match host {
+                IpAddr::V4(host) => format!("{host}:{port}"),
+                IpAddr::V6(host) => format!("[{host}]:{port}"),
+            };
+            log::info!("Listening on http://{addr}/");
+            ADDR.set(addr).unwrap();
+            Ok(listener)
+        }
+        Err(err) => {
+            let err_msg = if let std::io::ErrorKind::AddrInUse = err.kind() {
+                format!("Address {} is already in use", &addr)
+            } else {
+                format!("Failed to listen on {}: {}", addr, err)
+            };
+            log::error!("{err_msg}");
+            Err(err_msg)
         }
     }
 }
 
-fn create_server(
-    host: &str,
-    port: u16,
-    root: &PathBuf,
-    connections: Arc<Mutex<HashMap<Uuid, WebSocketConnection>>>,
-    watch: bool,
-) -> tide::Server<()> {
-    let mut app = tide::new();
-
-    static_assets_service!(app, "/", host, port, root, watch);
-    static_assets_service!(app, "/*", host, port, root, watch);
-
-    app.at("/_live-server/*").get(public_dir);
-
-    app.at("/live-server-ws")
-        .get(WebSocket::new(move |_request, mut stream| {
-            let connections = Arc::clone(&connections);
-            async move {
-                let uuid = Uuid::new_v4();
-
-                // Add the connection to clients when opening a new connection
-                connections.lock().await.insert(uuid, stream.clone());
-
-                // Waiting for the connection to be closed
-                while let Some(Ok(_)) = stream.next().await {}
-
-                // Remove the connection from clients when it is closed
-                connections.lock().await.remove(&uuid);
-
-                Ok(())
-            }
-        }));
-    app
+pub(crate) fn create_server() -> Router {
+    Router::new()
+        .route("/", get(static_assets))
+        .route("/*path", get(static_assets))
+        .nest("/_live-server/*path", static_router())
+        .route(
+            "/live-server-ws",
+            get(|ws: WebSocketUpgrade| async move {
+                ws.on_failed_upgrade(|error| {
+                    log::error!("Failed to upgrade websocket: {}", error);
+                })
+                .on_upgrade(|socket| async move {
+                    let (mut sender, mut receiver) = socket.split();
+                    let tx = TX.get().unwrap();
+                    let mut rx = tx.subscribe();
+                    let mut send_task = tokio::spawn(async move {
+                        while rx.recv().await.is_ok() {
+                            sender.send(Message::Text(String::new())).await.unwrap();
+                        }
+                    });
+                    let mut recv_task =
+                        tokio::spawn(
+                            async move { while let Some(Ok(_)) = receiver.next().await {} },
+                        );
+                    tokio::select! {
+                        _ = (&mut send_task) => recv_task.abort(),
+                        _ = (&mut recv_task) => send_task.abort(),
+                    };
+                })
+            }),
+        )
 }
 
-async fn static_assets(
-    req: Request<()>,
-    host: String,
-    port: u16,
-    root: PathBuf,
-    watch: bool,
-) -> Result<Response, tide::Error> {
-    // Get the path and mime of the static file.
-    let mut path = req.url().path().to_string();
+async fn static_assets(req: Request<Body>) -> (StatusCode, HeaderMap, Body) {
+    let addr = ADDR.get().unwrap();
+    let root = ROOT.get().unwrap();
 
+    // Get the path and mime of the static file.
+    let mut path = req.uri().path().to_string();
     path.remove(0);
 
-    let mut path = root.join(path);
+    let path = root.join(path);
 
-    if path.is_dir().await {
-        let dir = path.clone();
-        path.push("index.html");
-
-        if !path.exists().await {
-            return serve_directory_listing(dir).await;
-        }
+    if !path.starts_with(root) {
+        return internal_err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "Path is outside of root directory",
+        ));
     }
+
+    let path = if path.is_dir() {
+        let index = path.join("index.html");
+        if tokio::fs::try_exists(&index).await.unwrap_or(false) {
+            index
+        } else {
+            return serve_directory_listing(path).await;
+        }
+    } else {
+        path
+    };
+
+    log::debug!("Serving {path:?}");
 
     let mime = mime_guess::from_path(&path).first_or_text_plain();
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime.as_ref()).unwrap(),
+    );
 
     // Read the file.
-    let mut file = fs::read(&path).await.map_err(not_found)?;
+    let file = match fs::read(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            match path.to_str() {
+                Some(path) => log::warn!("Failed to read \"{}\": {}", path, err),
+                None => log::warn!("Failed to read file with invalid path: {}", err),
+            }
+            let status_code = match err.kind() {
+                ErrorKind::NotFound => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            if mime == "text/html" {
+                let script = format!(include_str!("templates/websocket.html"), addr);
+                let html = format!(include_str!("templates/error.html"), script, err);
+                let body = Body::from(html);
+
+                return (status_code, headers, body);
+            }
+            return (status_code, headers, Body::empty());
+        }
+    };
 
     // Construct the response.
-    if mime == "text/html" {
-        let text = String::from_utf8(file).map_err(internal_err)?;
+    let body = if mime == "text/html" && *WATCH.get().unwrap() {
+        let text = match String::from_utf8(file) {
+            Ok(text) => text,
+            Err(err) => return internal_err(err),
+        };
 
-        if watch {
-            let script = format!(include_str!("scripts/websocket.js"), host, port);
-            file = format!("{text}<script>{script}</script>").into_bytes();
-        } else {
-            file = text.into_bytes();
-        }
-    }
-    let mut response: Response = Body::from_bytes(file).into();
-    response.set_content_type(mime.to_string().as_str());
+        let script = format!(include_str!("templates/websocket.html"), addr);
 
-    Ok(response)
+        Body::from(format!("{text}{script}"))
+    } else {
+        Body::from(file)
+    };
+
+    (StatusCode::OK, headers, body)
 }
 
-async fn public_dir(req: Request<()>) -> Result<Response, tide::Error> {
-    let path = Path::new(req.url().path());
+fn static_router() -> Router {
+    Router::new()
+        .route("/index.css", get(|r| asset(r, get_index_css)))
+        .route("/entry.html", get(|r| asset(r, get_entry_html)))
+        .route("/listing.html", get(|r| asset(r, get_listing_html)))
+        .route("/dir.svg", get(|r| asset(r, get_dir_svg)))
+        .route("/file.svg", get(|r| asset(r, get_file_svg)))
+        .route("/dir-link.svg", get(|r| asset(r, get_dir_link_svg)))
+        .route("/file-link.svg", get(|r| asset(r, get_file_link_svg)))
+        .route("/unknown.svg", get(|r| asset(r, get_unknown_svg)))
+}
 
-    let path = path.strip_prefix("/_live-server").map_err(internal_err)?;
+async fn asset<F, Fut>(req: Request<Body>, content_fn: F) -> (StatusCode, HeaderMap, Body)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<String, std::io::Error>>,
+{
+    let path = Path::new(req.uri().path());
 
-    let path = Path::new("./public").join(path);
     let ext = path.extension().unwrap().to_string_lossy().to_string();
 
-    let mut response: Response = Body::from_bytes(get_static_file(path).await.map_err(not_found)?.into()).into();
-    response.set_content_type(mime_type(&ext));
+    let body = match content_fn().await {
+        Ok(body) => body,
+        Err(e) => return internal_err(e),
+    };
 
-    Ok(response)
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime_type(&ext)).unwrap(),
+    );
+
+    (StatusCode::OK, headers, Body::from(body))
 }
 
 fn mime_type(ext: &str) -> &str {
@@ -170,14 +216,12 @@ fn mime_type(ext: &str) -> &str {
     }
 }
 
-pub fn internal_err<E: Error + Send + Sync + 'static>(err: E) -> tide::Error {
+pub fn internal_err<E: Error + Send + Sync + 'static>(err: E) -> (StatusCode, HeaderMap, Body) {
     log::error!("{}", err);
 
-    tide::Error::from_str(StatusCode::InternalServerError, err)
-}
+    let body = Body::from(err.to_string());
+    let mut headers = HeaderMap::new();
+    headers.append(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
 
-pub fn not_found<E: Error + Send + Sync + 'static>(err: E) -> tide::Error {
-    log::warn!("{}", err);
-
-    tide::Error::from_str(StatusCode::NotFound, err)
+    (StatusCode::INTERNAL_SERVER_ERROR, headers, body)
 }

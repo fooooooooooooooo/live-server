@@ -25,25 +25,30 @@ $ cargo install live-server
 
 ```console
 $ live-server --help
-live-server 0.6.0
 Launch a local network server with live reload feature for static pages
 
-USAGE:
-    live-server [OPTIONS] [PATH]
+Usage: live-server.exe [OPTIONS] [ROOT]
 
-ARGS:
-    <PATH>    Set the path of the static assets [default: .]
+Arguments:
+  [ROOT]  Set the root path of the static assets [default: .]
 
-OPTIONS:
-    -h, --host <HOST>    Set the listener host [default: LAN IP address]
-        --help           Print help information
-    -p, --port <PORT>    Set the listener port [default: 8000]
-    -V, --version        Print version information
+Options:
+  -H, --host <HOST>  Set the listener host [default: 0.0.0.0]
+  -p, --port <PORT>  Set the listener port [default: 0]
+  -o, --open         Open the page in browser automatically
+  -h, --help         Print help
+  -V, --version      Print version
+```
+
+```console
+$ live-server
+[2023-12-22T15:16:04Z INFO  live_server::server] Listening on http://10.17.95.220:6634/
+[2023-12-22T15:16:04Z INFO  live_server::watcher] Listening on /home/mirus/html-demo
 ```
 
 ### Log Level
 
-You can set different [`RUST_LOG` environment variable](https://rust-lang-nursery.github.io/rust-cookbook/development_tools/debugging/config_log.html) to filter the log. The default log level is `info,tide=error`.
+You can set different [`RUST_LOG` environment variable](https://rust-lang-nursery.github.io/rust-cookbook/development_tools/debugging/config_log.html) to filter the log. The default log level is `info`.
 
 ## Package
 
@@ -53,7 +58,8 @@ You can also import it as a library in your project.
 
 ```rust
 use live_server::listen;
-listen("127.0.0.1", 8080, "./").await.unwrap();
+
+listen("127.0.0.1:8080", "./").await?.start().await?;
 ```
 
 ### Enable logs (Optional)

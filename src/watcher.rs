@@ -1,78 +1,119 @@
 use std::{
-    collections::HashMap,
-    sync::{mpsc::channel, Arc},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
-use async_std::{fs, path::PathBuf, sync::Mutex};
-use notify::{watcher, DebouncedEvent, RecursiveMode, Watcher};
-use tide_websockets::{Message, WebSocketConnection};
-use uuid::Uuid;
+use notify::{Error, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
+use notify_debouncer_full::{
+    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+};
+use tokio::{
+    runtime::Handle,
+    sync::mpsc::{channel, Receiver},
+};
 
-async fn broadcast(connections: &Arc<Mutex<HashMap<Uuid, WebSocketConnection>>>) {
-    for (_, conn) in connections.lock().await.iter() {
-        conn.send(Message::Text(String::new())).await.unwrap();
+use crate::TX;
+
+async fn broadcast() {
+    let tx = TX.get().unwrap();
+    let _ = tx.send(());
+}
+
+pub struct Watcher {
+    debouncer: Debouncer<RecommendedWatcher, FileIdMap>,
+    rx: Receiver<Result<Vec<DebouncedEvent>, Vec<notify::Error>>>,
+}
+
+pub(crate) async fn create_watcher() -> Result<Watcher, String> {
+    let rt = Handle::current();
+    let (tx, rx) = channel::<Result<Vec<DebouncedEvent>, Vec<Error>>>(16);
+    new_debouncer(
+        Duration::from_millis(200),
+        None,
+        move |result: DebounceEventResult| {
+            let tx = tx.clone();
+            rt.spawn(async move {
+                if let Err(err) = tx.send(result).await {
+                    log::error!("Failed to send event result: {}", err);
+                }
+            });
+        },
+    )
+    .map(|debouncer| Watcher { debouncer, rx })
+    .map_err(|e| e.to_string())
+}
+
+pub async fn watch(root_path: PathBuf, mut watcher: Watcher) {
+    watcher
+        .debouncer
+        .watcher()
+        .watch(&root_path, RecursiveMode::Recursive)
+        .unwrap();
+    watcher
+        .debouncer
+        .cache()
+        .add_root(&root_path, RecursiveMode::Recursive);
+
+    while let Some(result) = watcher.rx.recv().await {
+        let mut files_changed = false;
+        match result {
+            Ok(events) => {
+                for e in events {
+                    use notify::EventKind::*;
+                    match e.event.kind {
+                        Create(_) => {
+                            let path = e.event.paths[0].to_str().unwrap();
+                            log::debug!("[CREATE] {}", path);
+                            files_changed = true;
+                        }
+                        Modify(kind) => {
+                            use notify::event::ModifyKind::*;
+                            match kind {
+                                Name(kind) => {
+                                    use notify::event::RenameMode::*;
+                                    if let Both = kind {
+                                        let source_name = &e.event.paths[0];
+                                        let target_name = &e.event.paths[1];
+                                        log::debug!(
+                                            "[RENAME] {} -> {}",
+                                            strip_prefix(source_name, &root_path),
+                                            strip_prefix(target_name, &root_path)
+                                        );
+                                        files_changed = true;
+                                    }
+                                }
+                                _ => {
+                                    let paths = e.event.paths[0].to_str().unwrap();
+                                    log::debug!("[UPDATE] {}", paths);
+                                    files_changed = true;
+                                }
+                            }
+                        }
+                        Remove(_) => {
+                            let paths = e.event.paths[0].to_str().unwrap();
+                            log::debug!("[REMOVE] {}", paths);
+                            files_changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(errors) => {
+                for err in errors {
+                    log::error!("{}", err);
+                }
+            }
+        }
+        if files_changed {
+            broadcast().await;
+        }
     }
 }
 
-pub async fn watch(root: PathBuf, connections: &Arc<Mutex<HashMap<Uuid, WebSocketConnection>>>) {
-    let abs_root = match fs::canonicalize(&root).await {
-        Ok(path) => path,
-        Err(err) => {
-            log::error!("Failed to get absolute path of {:?}: {}", root, err);
-            return;
-        }
-    };
-    match abs_root.clone().into_os_string().into_string() {
-        Ok(path_str) => {
-            log::info!("Listening on {}", path_str);
-        }
-        Err(_) => {
-            log::error!("Failed to parse path to string for `{:?}`", abs_root);
-            return;
-        }
-    };
-
-    let (tx, rx) = channel();
-    let mut watcher = watcher(tx, Duration::from_millis(100)).unwrap();
-    match watcher.watch(abs_root.clone(), RecursiveMode::Recursive) {
-        Ok(_) => {}
-        Err(err) => log::warn!("Watcher: {}", err),
-    }
-
-    loop {
-        use DebouncedEvent::*;
-        let recv = rx.recv();
-        match recv {
-            Ok(event) => match event {
-                Create(path) => {
-                    log::debug!("[CREATE] {}", strip_prefix(path, &abs_root));
-                    broadcast(connections).await;
-                }
-                Write(path) => {
-                    log::debug!("[UPDATE] {}", strip_prefix(path, &abs_root));
-                    broadcast(connections).await;
-                }
-                Remove(path) => {
-                    log::debug!("[REMOVE] {}", strip_prefix(path, &abs_root));
-                    broadcast(connections).await;
-                }
-                Rename(from, to) => {
-                    log::debug!(
-                        "[RENAME] {} -> {}",
-                        strip_prefix(from, &abs_root),
-                        strip_prefix(to, &abs_root)
-                    );
-                    broadcast(connections).await;
-                }
-                Error(err, _) => log::error!("{}", err),
-                _ => {}
-            },
-            Err(err) => log::error!("{}", err),
-        }
-    }
-}
-
-fn strip_prefix(path: std::path::PathBuf, prefix: &PathBuf) -> String {
-    path.strip_prefix(prefix).unwrap().to_str().unwrap().to_string()
+fn strip_prefix(path: &Path, prefix: &PathBuf) -> String {
+    path.strip_prefix(prefix)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
 }
