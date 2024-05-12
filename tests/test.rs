@@ -3,7 +3,9 @@ use reqwest::StatusCode;
 
 #[tokio::test]
 async fn request() {
-    let listener = listen("127.0.0.1:8000", "./tests/page", true).await.unwrap();
+    let listener = listen("127.0.0.1:8000", "./tests/page", true)
+        .await
+        .unwrap();
     tokio::spawn(async {
         listener.start().await.unwrap();
     });
@@ -20,7 +22,7 @@ async fn request() {
     let target_text = format!(
         "{}{}",
         include_str!("./page/index.html"),
-        format!(
+        format_args!(
             include_str!("../src/templates/websocket.html"),
             "127.0.0.1:8000"
         )
