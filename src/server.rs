@@ -17,8 +17,7 @@ use tokio::net::TcpListener;
 
 use crate::listing::serve_directory_listing;
 use crate::static_files::{
-    get_dir_link_svg, get_dir_svg, get_entry_html, get_file_link_svg, get_file_svg, get_index_css,
-    get_listing_html, get_unknown_svg,
+    get_dir_link_svg, get_dir_svg, get_file_link_svg, get_file_svg, get_index_css, get_unknown_svg,
 };
 use crate::{ADDR, ROOT, TX, WATCH};
 
@@ -66,7 +65,7 @@ pub(crate) fn create_server() -> Router {
     Router::new()
         .route("/", get(static_assets))
         .route("/*path", get(static_assets))
-        .nest("/_live-server/*path", static_router())
+        .nest("/_live-server", static_router())
         .route(
             "/live-server-ws",
             get(|ws: WebSocketUpgrade| async move {
@@ -117,13 +116,11 @@ async fn static_assets(req: Request<Body>) -> (StatusCode, HeaderMap, Body) {
         if tokio::fs::try_exists(&index).await.unwrap_or(false) {
             index
         } else {
-            return serve_directory_listing(path).await;
+            return serve_directory_listing(root, path).await;
         }
     } else {
         path
     };
-
-    log::debug!("Serving {path:?}");
 
     let mime = mime_guess::from_path(&path).first_or_text_plain();
     let mut headers = HeaderMap::new();
@@ -175,8 +172,6 @@ async fn static_assets(req: Request<Body>) -> (StatusCode, HeaderMap, Body) {
 fn static_router() -> Router {
     Router::new()
         .route("/index.css", get(|r| asset(r, get_index_css)))
-        .route("/entry.html", get(|r| asset(r, get_entry_html)))
-        .route("/listing.html", get(|r| asset(r, get_listing_html)))
         .route("/dir.svg", get(|r| asset(r, get_dir_svg)))
         .route("/file.svg", get(|r| asset(r, get_file_svg)))
         .route("/dir-link.svg", get(|r| asset(r, get_dir_link_svg)))

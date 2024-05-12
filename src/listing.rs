@@ -1,21 +1,38 @@
-use async_std::{path::PathBuf, prelude::*};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::{body::Body, http::HeaderMap};
 use chrono::{DateTime, Local};
-use std::time::SystemTime;
-use tide::{Body, Response};
+use std::path::{Path, StripPrefixError};
+use std::{path::PathBuf, time::SystemTime};
+use tokio::fs::DirEntry;
 
-use crate::{server::internal_err, static_files::get_static_file};
+use crate::path_to_string_but_readable;
+use crate::server::internal_err;
+use crate::static_files::{
+    get_dir_link_svg, get_dir_svg, get_entry_html, get_file_link_svg, get_file_svg,
+    get_listing_html, get_unknown_svg,
+};
 
-pub async fn serve_directory_listing(dir: PathBuf) -> Result<Response, tide::Error> {
-    let dir_name = dir.to_string_lossy().to_string();
-    let dir_name = dir_name.trim_start_matches('.');
+pub async fn serve_directory_listing(root: &Path, dir: PathBuf) -> (StatusCode, HeaderMap, Body) {
+    let dir_string = path_to_string_but_readable(&dir);
 
-    let mut dir = dir.read_dir().await.map_err(internal_err)?;
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+
+    let mut dir = match tokio::fs::read_dir(&dir).await {
+        Ok(dir) => dir,
+        Err(e) => return internal_err(e),
+    };
 
     let mut entries = vec![];
     let mut rows = String::new();
 
-    while let Some(entry) = dir.next().await {
-        let entry = entry.map_err(internal_err)?;
+    while let Some(entry) = match dir.next_entry().await {
+        Ok(entry) => entry,
+        Err(e) => return internal_err(e),
+    } {
         let entry_type = get_entry_type(&entry.path()).await;
 
         entries.push((entry, entry_type));
@@ -27,9 +44,10 @@ pub async fn serve_directory_listing(dir: PathBuf) -> Result<Response, tide::Err
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
-        let path = entry.path();
-        let path = path.to_string_lossy();
-        let path = path.trim_start_matches('.');
+        let path = match entry_to_path(&entry, root) {
+            Ok(entry) => entry,
+            Err(e) => return internal_err(e),
+        };
 
         let (bytes, modified) = match entry.metadata().await {
             Ok(metadata) => (
@@ -43,27 +61,55 @@ pub async fn serve_directory_listing(dir: PathBuf) -> Result<Response, tide::Err
             _ => (None, None),
         };
 
-        let mut template = get_static_file("./public/entry.html").await.map_err(internal_err)?;
+        let mut template = match get_entry_html().await {
+            Ok(template) => template,
+            Err(e) => return internal_err(e),
+        };
 
-        template = render(template, "icon", entry_type.to_icon().await.map_err(internal_err)?);
+        template = render(
+            template,
+            "icon",
+            match entry_type.to_icon().await {
+                Ok(icon) => icon,
+                Err(e) => return internal_err(e),
+            },
+        );
+
         template = render(template, "path", path);
         template = render(template, "name", escape_html(name));
         template = render(template, "size", escape_html(bytes.unwrap_or_default()));
-        template = render(template, "modified", escape_html(modified.unwrap_or_default()));
+        template = render(
+            template,
+            "modified",
+            escape_html(modified.unwrap_or_default()),
+        );
 
         rows.push_str(&template);
     }
 
-    let mut template = get_static_file("./public/listing.html").await.map_err(internal_err)?;
+    let mut template = match get_listing_html().await {
+        Ok(template) => template,
+        Err(e) => return internal_err(e),
+    };
 
-    template = render(template, "directory", escape_html(dir_name));
+    template = render(template, "directory", escape_html(dir_string));
     template = render(template, "entries", rows);
 
-    let mut response: Response = Body::from_bytes(template.into()).into();
+    let body = Body::from(template);
 
-    response.set_content_type("text/html");
+    (StatusCode::OK, headers, body)
+}
 
-    Ok(response)
+fn entry_to_path(entry: &DirEntry, root: &Path) -> Result<String, StripPrefixError> {
+    let path = entry.path();
+
+    let path = if let Ok(p) = path.strip_prefix(root) {
+        p.to_path_buf()
+    } else {
+        path
+    };
+
+    Ok(format!("/{}", path_to_string_but_readable(path)))
 }
 
 fn render<S: AsRef<str>>(template: String, var_name: &str, value: S) -> String {
@@ -131,13 +177,12 @@ impl EntryType {
 
     async fn to_icon(&self) -> Result<String, std::io::Error> {
         match self {
-            EntryType::Dir => get_static_file("./public/dir.svg"),
-            EntryType::File => get_static_file("./public/file.svg"),
-            EntryType::DirLink => get_static_file("./public/dir_link.svg"),
-            EntryType::FileLink => get_static_file("./public/file_link.svg"),
-            EntryType::Other => get_static_file("./public/unknown.svg"),
+            EntryType::Dir => get_dir_svg().await,
+            EntryType::File => get_file_svg().await,
+            EntryType::DirLink => get_dir_link_svg().await,
+            EntryType::FileLink => get_file_link_svg().await,
+            EntryType::Other => get_unknown_svg().await,
         }
-        .await
     }
 }
 
@@ -153,19 +198,21 @@ impl std::fmt::Display for EntryType {
     }
 }
 
-async fn get_entry_type(path: &PathBuf) -> EntryType {
-    if let Ok(metadata) = async_std::fs::symlink_metadata(path).await {
+async fn get_entry_type<P: AsRef<Path>>(path: P) -> EntryType {
+    let path = path.as_ref();
+
+    if let Ok(metadata) = tokio::fs::symlink_metadata(path).await {
         if metadata.file_type().is_symlink() {
-            if let Ok(target_metadata) = async_std::fs::metadata(path).await {
+            if let Ok(target_metadata) = tokio::fs::metadata(path).await {
                 if target_metadata.is_dir() {
                     return EntryType::DirLink;
                 } else if target_metadata.is_file() {
                     return EntryType::FileLink;
                 }
             }
-        } else if path.is_dir().await {
+        } else if metadata.is_dir() {
             return EntryType::Dir;
-        } else if path.is_file().await {
+        } else if metadata.is_file() {
             return EntryType::File;
         }
     }

@@ -5,7 +5,7 @@
 //! use live_server::listen;
 //!
 //! async fn serve() -> Result<(), Box<dyn std::error::Error>> {
-//!     listen("127.0.0.1:8080", "./").await?.start().await
+//!     listen("127.0.0.1:8080", "./", true).await?.start().await
 //! }
 //! ```
 //!
@@ -19,10 +19,15 @@ mod server;
 mod static_files;
 mod watcher;
 
-use std::{error::Error, net::IpAddr, path::PathBuf};
+use std::{
+    error::Error,
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
 
 use axum::Router;
 use local_ip_address::local_ip;
+use path_slash::PathExt;
 use server::{create_listener, create_server};
 use tokio::{
     net::TcpListener,
@@ -49,7 +54,7 @@ impl Listener {
     /// use live_server::listen;
     ///
     /// async fn serve() -> Result<(), Box<dyn std::error::Error>> {
-    ///     listen("127.0.0.1:8080", "./").await?.start().await
+    ///     listen("127.0.0.1:8080", "./", true).await?.start().await
     /// }
     /// ```
     pub async fn start(self) -> Result<(), Box<dyn Error>> {
@@ -75,7 +80,7 @@ impl Listener {
     /// use live_server::listen;
     ///
     /// async fn serve() {
-    ///     let listener = listen("127.0.0.1:8080", "./").await.unwrap();
+    ///     let listener = listen("127.0.0.1:8080", "./", true).await.unwrap();
     ///     let link = listener.link().unwrap();
     ///     assert_eq!(link, "http://127.0.0.1:8080");
     /// }
@@ -123,22 +128,17 @@ pub async fn listen<A: Into<String>, R: Into<PathBuf>>(
     let root_path = match tokio::fs::canonicalize(&root).await {
         Ok(path) => path,
         Err(err) => {
-            let err_msg = format!("Failed to get absolute path of {:?}: {}", root, err);
+            let err_msg = format!(
+                "Failed to get absolute path of {:?}: {}",
+                path_to_string_but_readable(root),
+                err
+            );
             log::error!("{}", err_msg);
             return Err(err_msg);
         }
     };
 
-    match root_path.clone().into_os_string().into_string() {
-        Ok(path_str) => {
-            log::info!("Listening on {}", path_str);
-        }
-        Err(_) => {
-            let err_msg = format!("Failed to parse path to string for `{:?}`", root_path);
-            log::error!("{}", err_msg);
-            return Err(err_msg);
-        }
-    };
+    log::info!("Listening on {}", path_to_string_but_readable(&root_path));
 
     let watcher = if watch {
         Some(create_watcher().await?)
@@ -152,4 +152,8 @@ pub async fn listen<A: Into<String>, R: Into<PathBuf>>(
         root_path,
         watcher,
     })
+}
+
+fn path_to_string_but_readable<P: AsRef<Path>>(path: P) -> String {
+    path.as_ref().to_slash_lossy().replace("\\\\?\\", "")
 }
